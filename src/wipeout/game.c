@@ -397,8 +397,9 @@ save_t save = {
 	.sfx_volume = 0.6,
 	.music_volume = 0.5,
 	.internal_roll = 0.6,
+	.screen_shake = 0.5,
 	.ui_scale = 0,
-	.show_fps = false,
+	.draw_stats = DRAW_STATS_OFF,
 	.fullscreen = false,
 	.screen_res = 0,
 	.post_effect = 0,
@@ -417,6 +418,7 @@ save_t save = {
 		[A_FIRE] = {INPUT_KEY_Z, INPUT_GAMEPAD_X},
 		[A_CHANGE_VIEW] = {INPUT_KEY_A, INPUT_GAMEPAD_Y},
 	},
+	.analog_response = 2, // Exponent for stick turn input
 
 	.highscores_name = {0,0,0,0},
 	.highscores = {
@@ -511,7 +513,7 @@ void game_init(void) {
 			memcpy(&save, save_file, sizeof(save_t));
 		}
 		else {
-			printf("unexpected size/magic for save data");
+			printf("unexpected size/magic for save data\n");
 		}
 		mem_temp_free(save_file);
 	}
@@ -654,5 +656,7 @@ void game_update(void) {
 	if (g.frame_time > 0) {
 		g.frame_rate = ((double)g.frame_rate * 0.95) + (1.0/g.frame_time) * 0.05;
 	}
+	
+	// The only drawing left here should be the post process
 }
 

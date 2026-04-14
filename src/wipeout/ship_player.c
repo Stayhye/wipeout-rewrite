@@ -176,22 +176,34 @@ void ship_player_update_race(ship_t *self) {
 		// FIXME_PL: make sure revconned is honored
 	}
 
+
+	// Turning
+	// For analog input we set a turn_target (exponentiated by the analog_response 
+	// curve) and stop adding to angular acceleration once we exceed that target. 
+	// For digital input (0|1) the powf() and multiplication with turn_rate_max 
+	// will have no influence on the original behavior.
 	self->angular_acceleration = vec3(0, 0, 0);
 
 	if (input_state(A_LEFT)) {
-		if (self->angular_velocity.y >= 0) {
-			self->angular_acceleration.y += input_state(A_LEFT) * self->turn_rate;
+		if (self->angular_velocity.y < 0) {
+			self->angular_acceleration.y += self->turn_rate * 2;
 		}
-		else if (self->angular_velocity.y < 0) {
-			self->angular_acceleration.y += input_state(A_LEFT) * self->turn_rate * 2;
+		else {
+			float turn_target = powf(input_state(A_LEFT), save.analog_response);
+			if (turn_target * self->turn_rate_max > self->angular_velocity.y) {
+				self->angular_acceleration.y += self->turn_rate;
+			}
 		}
 	}
 	else if (input_state(A_RIGHT)) {
-		if (self->angular_velocity.y <= 0) {
-			self->angular_acceleration.y -= input_state(A_RIGHT) * self->turn_rate;
+		if (self->angular_velocity.y > 0) {
+			self->angular_acceleration.y -= self->turn_rate * 2;
 		}
-		else if (self->angular_velocity.y > 0) {
-			self->angular_acceleration.y -= input_state(A_RIGHT) * self->turn_rate * 2;
+		else {
+			float turn_target = powf(input_state(A_RIGHT), save.analog_response);
+			if (turn_target * -self->turn_rate_max < self->angular_velocity.y) {	
+				self->angular_acceleration.y -= self->turn_rate;
+			}
 		}
 	}
 	
@@ -202,7 +214,7 @@ void ship_player_update_race(ship_t *self) {
 		if (self->ebolt_effect_timer > 0.1) {
 			self->ebolt_effect_timer -= 0.1;
 			if (flags_is(self->flags, SHIP_VIEW_INTERNAL)) {
-				// SetShake(2); // FIXME
+				camera_set_shake(&g.camera, CAMERA_SHAKE_SHORT);
 			}
 			self->angular_velocity.y += rand_float(-0.5, 0.5);
 
@@ -316,7 +328,7 @@ void ship_player_update_race(ship_t *self) {
 			vec3_angle(vec2, vec3) +
 			vec3_angle(vec3, vec1) +
 			vec3_angle(vec1, vec0);
-		if (angle < M_PI * 2 - 0.01) {
+		if (angle < (0.91552734375 * M_PI * 2)) {
 			flags_add(self->flags, SHIP_FLYING);
 		}
 	}
@@ -347,10 +359,10 @@ void ship_player_update_race(ship_t *self) {
 			}
 			self->velocity = vec3_reflect(self->velocity, face->normal, 2);
 			self->velocity = vec3_sub(self->velocity, vec3_mulf(self->velocity, 0.125));
-			self->velocity = vec3_sub(self->velocity, face->normal);
+			self->velocity = vec3_sub(self->velocity, vec3_mulf(face->normal, 64.0 * 30 * system_tick()));
 		}
 		else if (height < 30) {
-			self->velocity = vec3_add(self->velocity, vec3_mulf(face->normal, 4096.0 * 30 * system_tick()));
+			self->velocity = vec3_add(self->velocity, vec3_mulf(face->normal, 64.0 * 30 * system_tick()));
 		}
 
 		if (height < 50) {
@@ -383,50 +395,39 @@ void ship_player_update_race(ship_t *self) {
 
 	// Flying
 	else {
-		// Detect the need for a rescue droid
-		section_t *next = self->section->next;
+		//	Detect the need for a rescue droid
+		float distance = ship_player_find_distance_from_track(self);
 
-		vec3_t best_path = vec3_project_to_ray(self->position, next->center, self->section->center);
-		vec3_t distance = vec3_sub(best_path, self->position);
-
-		if (distance.y > -512) {
-			distance.y = distance.y * 0.0001;
-		}
-		else {
-			distance = vec3_mulf(distance, 8);
-		}
-
-		// Do we need to be rescued?
-		if (vec3_len(distance) > 8000) {
-			self->update_func = ship_player_update_rescue;
-			self->update_timer = UPDATE_TIME_RESCUE;
-			flags_add(self->flags, SHIP_IN_RESCUE | SHIP_FLYING);
-
+		//	We've fallen off of a jump, rescue to the other side
+		if (distance > 8000 && flags_is(self->section->flags, SECTION_JUMP)) {
 			section_t *landing = self->section->prev;
-			for (int i = 0; i < 3; i++) {
-				landing = landing->prev;
-			}
-			for (int i = 0; i < 10 && flags_not(landing->flags, SECTION_JUMP); i++) {
+			
+			while(flags_not(landing->flags, SECTION_JUMP)) {
 				landing = landing->next;
 			}
-			self->section = landing;
-			self->temp_target = vec3_mulf(vec3_add(landing->center, landing->next->center), 0.5);
-			self->temp_target.y -= 2000;
-			self->velocity = vec3(0, 0, 0);
+			landing = landing->next;
+
+			ship_player_begin_rescue_to_section(self, landing);
 		}
-
-
-		float brake = (self->brake_left + self->brake_right);
-		float resistance = (self->resistance * (SHIP_MAX_RESISTANCE - (brake * 0.125))) * 0.0078125;
-
-		vec3_t force = vec3(0, SHIP_FLYING_GRAVITY, 0);
-		force = vec3_add(force, self->thrust);
-
-		self->acceleration = vec3_divf(vec3_sub(forward_velocity, self->velocity), SHIP_MIN_RESISTANCE + brake * 4);
-		self->acceleration = vec3_add(self->acceleration, vec3_divf(force, self->mass));
-		self->acceleration = vec3_sub(self->acceleration, vec3_divf(self->velocity, resistance));
-
-		self->angular_acceleration.x += NTSC_ACCELERATION(ANGLE_NORM_TO_RADIAN(FIXED_TO_FLOAT(-50.0/16.0)));
+		//	We've flown off the track into the scenery, rescue to last on-track position
+		else if (distance > 10000) {
+			section_t *landing = self->section->prev;
+			ship_player_begin_rescue_to_section(self, landing);
+		}
+		//	Everything is normal, manouver through the air
+		else {
+			float brake = (self->brake_left + self->brake_right);
+			float resistance = (self->resistance * (SHIP_MAX_RESISTANCE - (brake * 0.125))) * 0.0078125;
+	
+			vec3_t force = vec3(0, SHIP_FLYING_GRAVITY, 0);
+			force = vec3_add(force, self->thrust);
+	
+			self->acceleration = vec3_divf(vec3_sub(forward_velocity, self->velocity), SHIP_MIN_RESISTANCE + brake * 4);
+			self->acceleration = vec3_add(self->acceleration, vec3_divf(force, self->mass));
+			self->acceleration = vec3_sub(self->acceleration, vec3_divf(self->velocity, resistance));
+	
+			self->angular_acceleration.x += NTSC_ACCELERATION(ANGLE_NORM_TO_RADIAN(FIXED_TO_FLOAT(-50.0/16.0)));
+		}
 	}
 
 	// Position
@@ -434,8 +435,7 @@ void ship_player_update_race(ship_t *self) {
 	self->position = vec3_add(self->position, vec3_mulf(self->velocity, 0.015625 * 30 * system_tick()));
 
 	self->angular_acceleration.x -= self->angular_velocity.x * 0.25 * 30;
-	self->angular_acceleration.z += (self->angular_velocity.y - 0.5 * self->angular_velocity.z) * 30;
-
+	self->angular_acceleration.z += (self->angular_velocity.y - (0.5 * self->angular_velocity.z)) * 30;
 
 	// Orientation
 	if (self->angular_acceleration.y == 0) {
@@ -472,24 +472,24 @@ void ship_player_update_rescue(ship_t *self) {
 	section_t *next = self->section->next;
 
 	if (flags_is(self->flags, SHIP_IN_TOW)) {
-		self->temp_target = vec3_add(self->temp_target, vec3_mulf(vec3_sub(next->center, self->temp_target), 0.0078125));
+		self->temp_target = vec3_add(self->temp_target, vec3_mulf(vec3_sub(next->center, self->temp_target), 0.0078125)); // >> 7
 		self->velocity = vec3_sub(self->temp_target, self->position);
 		vec3_t target_dir = vec3_sub(next->center, self->section->center);
 
-		self->angular_velocity.y = wrap_angle(-atan2(target_dir.x, target_dir.z) - self->angle.y) * (1.0/16.0) * 30;
+		self->angular_velocity.y = wrap_angle(-atan2(target_dir.x, target_dir.z) - self->angle.y) * 0.015625 * 30; // >> 6
 		self->angle.y = wrap_angle(self->angle.y + self->angular_velocity.y * system_tick());
 	}
 
-	self->angle.x -= self->angle.x * 0.125 * 30 * system_tick();
-	self->angle.z -= self->angle.z * 0.03125 * 30 * system_tick();
+	self->angle.x -= self->angle.x * 0.125 * 30 * system_tick(); // >> 3
+	self->angle.z -= self->angle.z * 0.03125 * 30 * system_tick(); // >> 5
 
 	self->velocity = vec3_sub(self->velocity, vec3_mulf(self->velocity, 0.0625 * 30 * system_tick()));
 	self->position = vec3_add(self->position, vec3_mulf(self->velocity, 0.03125 * 30 * system_tick()));
 
 
 	// Are we done being rescued?
-	float distance = vec3_len(vec3_sub(self->position, self->temp_target));
-	if (flags_is(self->flags, SHIP_IN_TOW) && distance < 800) {
+	float distance = ship_player_find_distance_from_track(self);
+	if (flags_is(self->flags, SHIP_IN_TOW) && distance < 300) {
 		self->update_func = ship_player_update_race;
 		self->update_timer = 0;
 		flags_rm(self->flags, SHIP_IN_RESCUE);
@@ -502,6 +502,36 @@ void ship_player_update_rescue(ship_t *self) {
 			g.camera.update_func = camera_update_race_external;
 		}
 	}
+}
+
+
+void ship_player_begin_rescue_to_section(ship_t *self, section_t *section)
+{
+	self->update_func = ship_player_update_rescue;
+	self->update_timer = UPDATE_TIME_RESCUE;
+	flags_add(self->flags, SHIP_IN_RESCUE | SHIP_FLYING);
+
+	self->section = section;
+	self->temp_target = vec3_mulf(vec3_add(section->center, section->next->center), 0.55);
+	self->temp_target.y -= 2000;
+	self->velocity = vec3(0, 0, 0);
+}
+
+const float ship_player_find_distance_from_track(ship_t *self)
+{
+	section_t *next = self->section->next;
+
+	vec3_t best_path = vec3_project_to_ray(self->position, next->center, self->section->center);
+	vec3_t distance = vec3_sub(best_path, self->position);
+
+	if (distance.y > -512) {
+		distance.y = distance.y * 0.0001;
+	}
+	else {
+		distance = vec3_mulf(distance, 8);
+	}
+
+	return vec3_len(distance);
 }
 
 
@@ -580,4 +610,3 @@ ship_t *ship_player_find_target(ship_t *self) {
 		return NULL;
 	}
 }
-
